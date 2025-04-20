@@ -470,20 +470,21 @@ def generate_with_gemini(prompt):
         raise
 
 @app.route('/')
+@app.route('/index')
 def home():
-    return render_templates('index.html')
+    return render_template('index.html')
 
 @app.route('/about_us')
 def about_us():
-    return render_templates('about_us.html')
+    return render_template('about_us.html')
 
 @app.route('/contact_us')
 def contact_us():
-    return render_templates('contact_us.html')
+    return render_template('contact_us.html')
 
 @app.route('/explore_tools')
 def explore_tools():
-    return render_templates('explore_tools.html')
+    return render_template('explore_tools.html')
 
 
 # @app.route('/upscale', methods=['GET', 'POST'])
