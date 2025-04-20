@@ -16,8 +16,9 @@ import cv2
 import numpy as np
 from PIL import Image
 import torch
-from basicsr.archs.rrdbnet_arch import RRDBNet
-from realesrgan import RealESRGANer
+# Commented out upscale-related imports
+# from basicsr.archs.rrdbnet_arch import RRDBNet
+# from realesrgan import RealESRGANer
 import google.generativeai as genai
 from google.generativeai.types import HarmCategory, HarmBlockThreshold
 import langdetect
@@ -33,6 +34,19 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+# Check API keys and log warnings
+def check_api_keys():
+    if not os.getenv("GEMINI_API_KEY"):
+        logger.warning("GEMINI_API_KEY is not set. Gemini features will not work properly.")
+    
+    if not os.getenv("TOGETHER_API_KEY") and not os.getenv("HUGGINGFACE_TOKEN"):
+        logger.warning("Neither TOGETHER_API_KEY nor HUGGINGFACE_TOKEN is set. Image generation may not work properly.")
+    
+    return True
+
+# Run check on startup
+check_api_keys()
 
 # Create output directory if it doesn't exist
 OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'output')
@@ -95,12 +109,13 @@ translator = Translator(to_lang="en")
 # Configure Gemini API
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 genai.configure(api_key=GEMINI_API_KEY)
+#GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyCE1jtt0YLHgr_mNB_mEbfvYaQlyKKaXZk")
 
 @retry_with_backoff(retries=3, backoff_in_seconds=1)
 def detect_language_with_gemini(text):
     """Detect language using Gemini API"""
     try:
-        model = genai.GenerativeModel('gemini-2.0-flash-thinking-exp-01-21')
+        model = genai.GenerativeModel('gemini-2.0-flash')
         prompt = f"""
         Detect the language of the following text. 
         Return only the ISO 639-1 language code (e.g., 'en' for English, 'es' for Spanish, etc.).
@@ -136,7 +151,7 @@ def translate_with_gemini(text, target_lang='en'):
         if source_lang == target_lang:
             return text, source_lang
             
-        model = genai.GenerativeModel('gemini-2.0-flash-thinking-exp-01-21')
+        model = genai.GenerativeModel('gemini-2.0-flash')
         prompt = f"""
         Translate the following text from {source_lang} to {target_lang}.
         Return only the translated text without any additional explanations.
@@ -166,20 +181,20 @@ def translate_text(text, target_lang='en'):
     except Exception as e:
         logger.error(f"Gemini translation failed: {str(e)}")
         # Fallback to basic translator
-        try:
-            # Detect the source language
-            source_lang = langdetect.detect(text)
+    try:
+        # Detect the source language
+        source_lang = langdetect.detect(text)
+        
+        # If text is already in English, return as is
+        if source_lang == target_lang:
+            return text, source_lang
             
-            # If text is already in English, return as is
-            if source_lang == target_lang:
-                return text, source_lang
-                
-            # Translate using translate package
-            translation = translator.translate(text)
-            return translation, source_lang
-        except Exception as e:
-            logger.error(f"Translation error: {str(e)}")
-            return text, 'unknown'  # Return original text if translation fails
+        # Translate using translate package
+        translation = translator.translate(text)
+        return translation, source_lang
+    except Exception as e:
+        logger.error(f"Translation error: {str(e)}")
+        return text, 'unknown'  # Return original text if translation fails
 
 @app.route('/detect-language', methods=['POST'])
 def detect_language():
@@ -261,6 +276,11 @@ headers = {"Authorization": f"Bearer {os.environ['HUGGINGFACE_TOKEN']}"}
 def sync_enhance_prompt_with_gemini(prompt, preserve_language=True):
     """Enhance the user's prompt using Gemini 2.0 Flash with multilingual support"""
     try:
+        # Check if API key is available
+        if not GEMINI_API_KEY:
+            logger.warning("No Gemini API key available for prompt enhancement")
+            return prompt  # Return original prompt without enhancement
+            
         # First detect the original language
         original_lang = detect_language_with_gemini(prompt)
         
@@ -271,7 +291,7 @@ def sync_enhance_prompt_with_gemini(prompt, preserve_language=True):
             translated_prompt = prompt
         
         # Configure the model
-        model = genai.GenerativeModel('gemini-2.0-flash-thinking-exp-01-21')
+        model = genai.GenerativeModel('gemini-2.0-flash')
         
         # Create a structured prompt for Gemini using more neutral language
         gemini_prompt = f"""
@@ -321,7 +341,21 @@ def sync_enhance_prompt_with_gemini(prompt, preserve_language=True):
         return enhanced_prompt
     except Exception as e:
         logger.error(f"Error enhancing prompt with Gemini: {str(e)}")
-        return prompt  # Fallback to original prompt if enhancement fails
+        # Add a basic enhancement if Gemini fails
+        try:
+            # Simple enhancement by adding some common image quality descriptors
+            quality_terms = ["high resolution", "detailed", "sharp focus", "professional lighting"]
+            style_terms = ["vibrant colors", "photorealistic", "beautiful composition"]
+            
+            # Pick a few terms to add
+            import random
+            selected_terms = random.sample(quality_terms, 2) + random.sample(style_terms, 1)
+            
+            # Add terms to the original prompt
+            enhanced = prompt + ", " + ", ".join(selected_terms)
+            return enhanced
+        except:
+            return prompt  # Return original prompt if enhancement fails
 
 @retry_with_backoff(retries=3, backoff_in_seconds=1)
 def generate_with_huggingface(prompt):
@@ -409,7 +443,7 @@ def generate_with_gemini(prompt):
     logger.info("Generating image with Gemini")
     try:
         # Configure the model - use gemini-1.5-pro for image generation
-        model = genai.GenerativeModel('gemini-2.0-flash-thinking-exp-01-21')
+        model = genai.GenerativeModel('gemini-2.0-flash')
         
         # Generate image
         response = model.generate_content(
@@ -435,37 +469,6 @@ def generate_with_gemini(prompt):
         logger.error(f"Gemini image generation error: {str(e)}")
         raise
 
-def init_realesrgan():
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=4)
-    
-    # Create weights directory if it doesn't exist
-    model_path = os.path.join(os.path.dirname(__file__), 'weights')
-    os.makedirs(model_path, exist_ok=True)
-    
-    # Model path
-    model_file = os.path.join(model_path, 'RealESRGAN_x4plus.pth')
-    
-    # Download model if not exists
-    if not os.path.exists(model_file):
-        url = 'https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth'
-        response = requests.get(url)
-        with open(model_file, 'wb') as f:
-            f.write(response.content)
-    
-    # Initialize upsampler
-    upsampler = RealESRGANer(
-        scale=4,
-        model_path=model_file,
-        model=model,
-        tile=512,  # Increased tile size for better quality
-        tile_pad=32,  # Increased padding to reduce artifacts
-        pre_pad=0,
-        half=device == 'cuda'  # Use half precision on CUDA
-    )
-    
-    return upsampler
-
 @app.route('/')
 def home():
     return render_template('index.html')
@@ -483,80 +486,88 @@ def explore_tools():
     return render_template('explore_tools.html')
 
 
-@app.route('/upscale', methods=['GET', 'POST'])
-def upscale():
-    try:
-        if request.method == 'POST':
-            if 'image' not in request.files:
-                return 'No image uploaded', 400
-            
-            file = request.files['image']
-            if file.filename == '':
-                return 'No image selected', 400
-
-            # Read the image
-            img_stream = BytesIO(file.read())
-            original_image = Image.open(img_stream).convert('RGB')
-            
-            # Convert PIL Image to numpy array
-            input_img = np.array(original_image)
-            
-            try:
-                # Initialize Real-ESRGAN
-                upsampler = init_realesrgan()
-                
-                # Process the image with tiling
-                output, _ = upsampler.enhance(input_img, outscale=4)
-                
-                # Convert output to PIL Image
-                upscaled_pil = Image.fromarray(output)
-                
-            except Exception as e:
-                logging.error(f"Real-ESRGAN failed, falling back to OpenCV: {str(e)}")
-                # Fallback to OpenCV if Real-ESRGAN fails
-                # Use LANCZOS4 for high-quality upscaling
-                upscaled = cv2.resize(input_img, None, fx=4, fy=4, interpolation=cv2.INTER_LANCZOS4)
-                upscaled_pil = Image.fromarray(upscaled)
-            
-            # Convert images to base64 for display
-            buffered = BytesIO()
-            original_image.save(buffered, format="PNG", optimize=True)
-            original_base64 = base64.b64encode(buffered.getvalue()).decode()
-            
-            buffered = BytesIO()
-            upscaled_pil.save(buffered, format="PNG", optimize=True)
-            upscaled_base64 = base64.b64encode(buffered.getvalue()).decode()
-            
-            return render_template('upscale.html', 
-                                original_image=original_base64,
-                                upscaled_image=upscaled_base64)
-        
-        return render_template('upscale.html')
-    except Exception as e:
-        logging.error(f"Error in upscale route: {str(e)}")
-        return "An error occurred while processing the image", 500
+# @app.route('/upscale', methods=['GET', 'POST'])
+# def upscale():
+#     try:
+#         if request.method == 'POST':
+#             if 'image' not in request.files:
+#                 return 'No image uploaded', 400
+#             
+#             file = request.files['image']
+#             if file.filename == '':
+#                 return 'No image selected', 400
+#
+#             # Read the image
+#             img_stream = BytesIO(file.read())
+#             original_image = Image.open(img_stream).convert('RGB')
+#             
+#             # Convert PIL Image to numpy array
+#             input_img = np.array(original_image)
+#             
+#             try:
+#                 # Initialize Real-ESRGAN
+#                 # upsampler = init_realesrgan()
+#                 
+#                 # Process the image with tiling
+#                 # output, _ = upsampler.enhance(input_img, outscale=4)
+#                 
+#                 # Convert output to PIL Image
+#                 # upscaled_pil = Image.fromarray(output)
+#                 
+#             except Exception as e:
+#                 logging.error(f"Real-ESRGAN failed, falling back to OpenCV: {str(e)}")
+#                 # Fallback to OpenCV if Real-ESRGAN fails
+#                 # Use LANCZOS4 for high-quality upscaling
+#                 upscaled = cv2.resize(input_img, None, fx=4, fy=4, interpolation=cv2.INTER_LANCZOS4)
+#                 upscaled_pil = Image.fromarray(upscaled)
+#             
+#             # Convert images to base64 for display
+#             buffered = BytesIO()
+#             original_image.save(buffered, format="PNG", optimize=True)
+#             original_base64 = base64.b64encode(buffered.getvalue()).decode()
+#             
+#             buffered = BytesIO()
+#             upscaled_pil.save(buffered, format="PNG", optimize=True)
+#             upscaled_base64 = base64.b64encode(buffered.getvalue()).decode()
+#             
+#             return render_template('upscale.html', 
+#                                 original_image=original_base64,
+#                                 upscaled_image=upscaled_base64)
+#         
+#         return render_template('upscale.html')
+#     except Exception as e:
+#         logging.error(f"Error in upscale route: {str(e)}")
+#         return "An error occurred while processing the image", 500
 
 @app.route('/enhance-prompt', methods=['POST'])
 def enhance_prompt():
     try:
+        # Check if Gemini API key is properly set
+        if not GEMINI_API_KEY:
+            return jsonify({'success': False, 'error': 'Gemini API key is not set'}), 500
+            
         prompt = request.form.get('prompt')
         preserve_language = request.form.get('preserve_language', 'true').lower() == 'true'
         
         if not prompt:
             return jsonify({'success': False, 'error': 'No prompt provided'}), 400
+        
+        try:    
+            enhanced_prompt = sync_enhance_prompt_with_gemini(prompt, preserve_language)
             
-        enhanced_prompt = sync_enhance_prompt_with_gemini(prompt, preserve_language)
-        
-        # Detect languages for response
-        original_lang = detect_language_with_gemini(prompt)
-        enhanced_lang = detect_language_with_gemini(enhanced_prompt)
-        
-        return jsonify({
-            'success': True, 
-            'enhanced_prompt': enhanced_prompt,
-            'original_language': original_lang,
-            'enhanced_language': enhanced_lang
-        })
+            # Detect languages for response
+            original_lang = detect_language_with_gemini(prompt)
+            enhanced_lang = detect_language_with_gemini(enhanced_prompt)
+            
+            return jsonify({
+                'success': True, 
+                'enhanced_prompt': enhanced_prompt,
+                'original_language': original_lang,
+                'enhanced_language': enhanced_lang
+            })
+        except Exception as e:
+            logger.error(f"Error enhancing prompt: {str(e)}")
+            return jsonify({'success': False, 'error': f'Error enhancing prompt: {str(e)}'}), 500
     except Exception as e:
         logger.error(f"Error in enhance_prompt endpoint: {str(e)}")
         return jsonify({'success': False, 'error': str(e)}), 500
@@ -623,8 +634,5 @@ def generate_image():
         return jsonify({'success': False, 'error': 'Internal server error'}), 500
 
 if __name__ == '__main__':
-    # Set your ngrok auth token
-    ngrok.set_auth_token("2kF0h1FF3cshznbJqIAa7uaBpUd_5ouG3nr6T6Br8NYF9kuV")
-    public_url = ngrok.connect(5000).public_url
-    logger.info(f"Public URL: {public_url}")
-    app.run()
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)
